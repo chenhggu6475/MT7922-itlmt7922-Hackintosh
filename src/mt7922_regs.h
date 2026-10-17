@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+// MT7922 PCIe constants derived from Linux mt76 (MediaTek Inc.).
+// Reference: mt7921/pci.c, mt7921/regs.h, mt792x_regs.h, mt792x_dma.c.
+#ifndef MT7922_REGS_H
+#define MT7922_REGS_H
+#include <stdint.h>
+
+#define MT_BAR0_DIRECT_LIMIT 0x100000u
+#define MT_HW_CHIPID 0x70010200u
+#define MT_HW_REV 0x70010204u
+#define MT_CONN_ON_LPCTL 0x7c060010u
+#define PCIE_LPCR_HOST_SET_OWN (1u << 0)
+#define PCIE_LPCR_HOST_CLR_OWN (1u << 1)
+#define PCIE_LPCR_HOST_OWN_SYNC (1u << 2)
+#define MT_TOP_LPCR_HOST_BAND0 0x18060010u
+#define MT_TOP_LPCR_HOST_FW_OWN (1u << 0)
+#define MT_TOP_LPCR_HOST_DRV_OWN (1u << 1)
+
+// Connac2's remap base is in the low half of this register, unlike MT7925.
+#define MT_HIF_REMAP_L1 0xfe24cu
+#define MT_HIF_REMAP_L1_MASK 0x0000ffffu
+#define MT_HIF_REMAP_BASE_L1 0x40000u
+#define MT_WFSYS_SW_RST_B 0x18000140u
+#define WFSYS_SW_RST_B (1u << 0)
+#define WFSYS_SW_INIT_DONE (1u << 4)
+#define MT_CONN_ON_MISC 0x7c0600f0u
+#define MT_TOP_MISC_FW_STATE_MASK 0x7u
+#define MT_TOP_MISC2_FW_PWR_ON (1u << 0)
+#define MT_TOP_MISC2_FW_N9_RDY 0x3u
+#define MT_PCIE_MAC_INT_ENABLE 0x10188u
+#define MT_PCIE_MAC_PM 0x10194u
+#define MT_PCIE_MAC_PM_L0S_DIS (1u << 8)
+#define MT_SWDEF_MODE 0x0041f23cu
+#define MT_SWDEF_NORMAL_MODE 0u
+
+#define MT_WFDMA0_BASE 0xd4000u
+#define MT_WFDMA0(o) (MT_WFDMA0_BASE + (o))
+#define MT_WFDMA0_RST MT_WFDMA0(0x100)
+#define MT_WFDMA0_RST_LOGIC_RST (1u << 4)
+#define MT_WFDMA0_RST_DMASHDL_ALL_RST (1u << 5)
+#define MT_MCU_CMD MT_WFDMA0(0x1f0)
+#define MT_MCU2HOST_SW_INT_ENA MT_WFDMA0(0x1f4)
+#define MT_MCU_CMD_WAKE_RX_PCIE (1u << 0)
+#define MT_WFDMA0_HOST_INT_STA MT_WFDMA0(0x200)
+#define MT_WFDMA0_HOST_INT_ENA MT_WFDMA0(0x204)
+#define MT_WFDMA0_GLO_CFG MT_WFDMA0(0x208)
+#define GLO_TX_DMA_EN (1u << 0)
+#define GLO_TX_DMA_BUSY (1u << 1)
+#define GLO_RX_DMA_EN (1u << 2)
+#define GLO_RX_DMA_BUSY (1u << 3)
+#define GLO_DMA_SIZE_3 (3u << 4)
+#define GLO_TX_WB_DDONE (1u << 6)
+#define GLO_FIFO_DIS_CHECK (1u << 11)
+#define GLO_FIFO_LITTLE_ENDIAN (1u << 12)
+#define GLO_RX_WB_DDONE (1u << 13)
+#define GLO_CSR_DISP_BASE_PTR_CHAIN_EN (1u << 15)
+#define GLO_OMIT_RX_INFO_PFET2 (1u << 21)
+#define GLO_OMIT_RX_INFO (1u << 27)
+#define GLO_OMIT_TX_INFO (1u << 28)
+#define GLO_CLK_GAT_DIS (1u << 30)
+#define MT_WFDMA0_RST_DTX_PTR MT_WFDMA0(0x20c)
+#define MT_WFDMA0_GLO_CFG_EXT0 MT_WFDMA0(0x2b0)
+#define GLO_EXT0_CSR_TX_DMASHDL_EN (1u << 6)
+#define MT_WFDMA0_PRI_DLY_INT_CFG0 MT_WFDMA0(0x2f0)
+#define MT_WFDMA0_TX_RING_EXT_CTRL(n) MT_WFDMA0(0x600 + 4 * (n))
+#define MT_WFDMA0_RX_RING_EXT_CTRL(n) MT_WFDMA0(0x680 + 4 * (n))
+#define MT_TX_RING_BASE MT_WFDMA0(0x300)
+#define MT_RX_EVENT_RING_BASE MT_WFDMA0(0x500)
+#define MT_RX_EVENT_RUNTIME_RING_BASE MT_WFDMA0(0x540)
+#define MT_RX_DATA_RING_BASE MT_WFDMA0(0x520)
+#define MT_WFDMA_DUMMY_CR 0x54000120u
+#define MT_WFDMA_NEED_REINIT (1u << 1)
+#define MT_DMASHDL_SW_CONTROL 0x7c026004u
+#define MT_DMASHDL_DMASHDL_BYPASS (1u << 28)
+#define Q_DESC_BASE 0x0
+#define Q_RING_SIZE 0x4
+#define Q_CPU_IDX 0x8
+#define Q_DMA_IDX 0xc
+#define MT7922_TXQ_BAND0 0
+#define MT7922_TXQ_MCU_WM 17
+#define MT7922_TXQ_FWDL 16
+#define MT_DMA_CTL_SD_LEN0(l) (((uint32_t)(l) & 0x3fffu) << 16)
+#define MT_DMA_CTL_LAST_SEC0 (1u << 30)
+#define MT_DMA_CTL_DMA_DONE (1u << 31)
+#define MT_RX_BUF_SIZE 2048u
+#define MCU_CMD_TARGET_ADDRESS_LEN_REQ 0x01
+#define MCU_CMD_FW_START_REQ 0x02
+#define MCU_CMD_NIC_POWER_CTRL 0x04
+#define MCU_CMD_PATCH_START_REQ 0x05
+#define MCU_CMD_PATCH_FINISH_REQ 0x07
+#define MCU_CMD_PATCH_SEM_CONTROL 0x10
+#define MCU_PKT_ID 0xa0
+#define MCU_Q_QUERY 0
+#define MCU_Q_SET 1
+#define MCU_Q_NA 3
+#define PATCH_SEM_RELEASE 0
+#define PATCH_SEM_GET 1
+#define PATCH_IS_DL 1
+#define PATCH_NOT_DL_SEM_SUCCESS 2
+#define PATCH_REL_SEM_SUCCESS 3
+#define DL_MODE_ENCRYPT (1u << 0)
+#define DL_MODE_RESET_SEC_IV (1u << 3)
+#define DL_CONFIG_ENCRY_MODE_SEL (1u << 6)
+#define DL_MODE_NEED_RSP (1u << 31)
+#define FW_FEATURE_SET_ENCRYPT (1u << 0)
+#define FW_FEATURE_ENCRY_MODE (1u << 4)
+#define FW_FEATURE_OVERRIDE_ADDR (1u << 5)
+#define FW_FEATURE_NON_DL (1u << 6)
+#define FW_START_OVERRIDE (1u << 0)
+#define PATCH_SEC_TYPE_MASK 0xffffu
+#define PATCH_SEC_TYPE_INFO 0x2u
+#define PATCH_SEC_NOT_SUPPORT 0xffffffffu
+#define PATCH_HDR_SIZE 96u
+#define PATCH_SEC_SIZE 64u
+#define FW_TRAILER_SIZE 36u
+#define FW_REGION_SIZE 40u
+#define MCU_RX_HEADER_SIZE 36u
+#define MT_MCU_CMD_QUERY (1u << 16)
+#define MT_MCU_CMD_UNI (1u << 17)
+#define MT_MCU_CMD_CE (1u << 18)
+#define MT_MCU_CMD_WA (1u << 19)
+
+struct itl_reg_map { uint32_t phys, maps, size; };
+static const struct itl_reg_map itl_fixed_map[] = {
+    {0x820d0000,0x30000,0x10000}, {0x820ed000,0x24800,0x00800},
+    {0x820e4000,0x21000,0x00400}, {0x820e7000,0x21e00,0x00200},
+    {0x820eb000,0x24200,0x00400}, {0x820e2000,0x20800,0x00400},
+    {0x820e3000,0x20c00,0x00400}, {0x820e5000,0x21400,0x00800},
+    {0x00400000,0x80000,0x10000}, {0x00410000,0x90000,0x10000},
+    {0x40000000,0x70000,0x10000}, {0x54000000,0x02000,0x01000},
+    {0x55000000,0x03000,0x01000}, {0x58000000,0x06000,0x01000},
+    {0x59000000,0x07000,0x01000}, {0x7c000000,0xf0000,0x10000},
+    {0x7c020000,0xd0000,0x10000}, {0x7c060000,0xe0000,0x10000},
+    {0x80020000,0xb0000,0x10000}, {0x81020000,0xc0000,0x10000},
+    {0x820c0000,0x08000,0x04000}, {0x820c8000,0x0c000,0x02000},
+    {0x820cc000,0x0e000,0x01000}, {0x820cd000,0x0f000,0x01000},
+    {0x74030000,0x10000,0x10000}, {0x820ce000,0x21c00,0x00200},
+    {0x820cf000,0x22000,0x01000}, {0x820e0000,0x20000,0x00400},
+    {0x820e1000,0x20400,0x00200}, {0x820e9000,0x23400,0x00200},
+    {0x820ea000,0x24000,0x00200}, {0x820ec000,0x24600,0x00200},
+    {0x820f0000,0xa0000,0x00400}, {0x820f1000,0xa0600,0x00200},
+    {0x820f2000,0xa0800,0x00400}, {0x820f3000,0xa0c00,0x00400},
+    {0x820f4000,0xa1000,0x00400}, {0x820f5000,0xa1400,0x00800},
+    {0x820f7000,0xa1e00,0x00200}, {0x820f9000,0xa3400,0x00200},
+    {0x820fa000,0xa4000,0x00200}, {0x820fb000,0xa4200,0x00400},
+    {0x820fc000,0xa4600,0x00200}, {0x820fd000,0xa4800,0x00800},
+};
+#define ITL_FIXED_MAP_N (sizeof(itl_fixed_map) / sizeof(itl_fixed_map[0]))
+#endif
