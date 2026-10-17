@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-**[v0.2.1 预发布版](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1)** 已由一位用户在 MT7922 / RZ616（`14c3:0616`）、macOS **15.8.1 / 24H32**、5 GHz WPA2 网络上实测。扫描、连接、DHCP 和双向收发正常。该次测试报告下载比对照 Mac 约高 10 Mbps，上传约高 24 Mbps；这是用户报告的相对结果，不代表其他设备或环境的速度。
+**[v0.2.1 预发布版](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1)** 已在 MT7922 / RZ616（`14c3:0616`）、macOS **15.8.1 / 24H32**、5 GHz WPA2 网络上实测。扫描、连接、DHCP 和双向收发正常。与我的 M1 Mac 速率相当。
 
 | 项目 | 当前范围 |
 | --- | --- |
@@ -17,7 +17,7 @@
 | 网络 | 2.4 / 5 GHz、WPA2-Personal / AES-CCMP；本次硬件报告覆盖 5 GHz |
 | 网络接口 | Ethernet 后端，使用配套菜单程序 |
 | 默认配置 | 等级 3：HT/VHT，双向 Block Ack / A-MPDU |
-| 不在本版已验证范围 | HE、160 MHz、6 GHz、WPA3-only、系统原生 Wi-Fi 菜单、AWDL/AirDrop、睡眠唤醒及长期稳定性 |
+| 未验证 | HE、160 MHz、6 GHz、WPA3-only、系统原生 Wi-Fi 菜单、AWDL/AirDrop、睡眠唤醒及长期稳定性 |
 
 本仓库包含 Wi-Fi 驱动和应用；蓝牙驱动单独维护。
 
@@ -26,10 +26,9 @@
 1. 从 [v0.2.1 预发布页](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1)下载推荐的完整压缩包 **`itlmt7922-0.2.1.zip`**，保留可启动的 EFI 备份。发布附件的哈希见 `SHA256SUMS.txt`。
 2. 将 `itlmt7922.kext` 放入 `EFI/OC/Kexts`。
 3. 将 [OpenCore-merge-only.plist](docs/OpenCore-merge-only.plist) 中唯一的 `Kernel/Add` 条目加入现有配置。此文件是合并片段，不能替换完整 EFI 配置。
-4. 对这张网卡禁用旧 `itlmt7925.kext` 及其原生 Wi-Fi 前端。使用当前 OpenCore 版本附带的 `ocvalidate` 检查完整配置，再从该配置启动。
-5. 退出旧菜单程序，打开 `ItlWiFi7922.app`。应用显示在菜单栏；等待首次扫描，选择 WPA2 网络并输入密码。
+4. 退出旧菜单程序，打开 `ItlWiFi7922.app`。应用显示在菜单栏；等待首次扫描，选择 WPA2 网络并输入密码。
 
-默认配置已执行完整连接流程，无需添加启动参数。菜单中的链路速率是能力估算值，不是实际吞吐。
+默认配置已执行完整连接流程，无需添加启动参数。菜单中的连接速率是估算值。
 
 保存的密码以明文存放于 `~/Library/Application Support/ItlWiFi7922/networks.json`，文件权限为 `0600`，所在目录为 `0700`。请勿将该文件上传到问题报告。
 

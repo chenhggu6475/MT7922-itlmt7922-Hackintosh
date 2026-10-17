@@ -8,7 +8,7 @@ This port builds on [thanhnndev/ga403wm-hackintosh](https://github.com/thanhnnde
 
 ## Status
 
-**[v0.2.1 prerelease](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1)** has been tested by one user on an MT7922 / RZ616 (`14c3:0616`) running macOS **15.8.1 / 24H32**, with a 5 GHz WPA2 network. Scanning, joining, DHCP and bidirectional traffic worked. The user reported download throughput about 10 Mbps and upload about 24 Mbps above a comparison Mac in that test. These are relative reports, not exact replacement measurements or a guarantee for other systems.
+**[v0.2.1 prerelease](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1)** has been tested on an MT7922 / RZ616 (`14c3:0616`) running macOS **15.8.1 / 24H32**, with a 5 GHz WPA2 network. Scanning, joining, DHCP and bidirectional traffic worked. Throughput was comparable to my M1 Mac.
 
 | Item | Current scope |
 | --- | --- |
@@ -17,7 +17,7 @@ This port builds on [thanhnndev/ga403wm-hackintosh](https://github.com/thanhnnde
 | Networks | 2.4 / 5 GHz, WPA2-Personal with AES-CCMP; hardware report covers 5 GHz |
 | Interface | Ethernet backend with the supplied menu app |
 | Default profile | Level 3: HT/VHT with transmit and receive Block Ack / A-MPDU |
-| Outside this release's verified scope | HE, 160 MHz, 6 GHz, WPA3-only, native macOS Wi-Fi UI, AWDL/AirDrop, sleep/wake and long-term stability |
+| Unverified | HE, 160 MHz, 6 GHz, WPA3-only, native macOS Wi-Fi UI, AWDL/AirDrop, sleep/wake and long-term stability |
 
 This repository contains the Wi-Fi driver and its app. Bluetooth drivers are maintained separately.
 
@@ -26,10 +26,9 @@ This repository contains the Wi-Fi driver and its app. Bluetooth drivers are mai
 1. Download the recommended combined archive, **`itlmt7922-0.2.1.zip`**, from the [v0.2.1 prerelease](https://github.com/hbyonly1/itlmt7922/releases/tag/v0.2.1) and keep a bootable EFI backup. Release asset hashes are in `SHA256SUMS.txt`.
 2. Copy `itlmt7922.kext` to `EFI/OC/Kexts`.
 3. Merge the single `Kernel/Add` entry from [OpenCore-merge-only.plist](docs/OpenCore-merge-only.plist) into your existing configuration. This file is a merge fragment, not a complete EFI configuration.
-4. Disable any old `itlmt7925.kext` and its native Wi-Fi frontend for this card. Validate the full configuration with the `ocvalidate` supplied with your OpenCore version, then boot it.
-5. Quit the old menu app and open `ItlWiFi7922.app`. It runs in the menu bar. Wait for the first scan, select a WPA2 network and enter its password.
+4. Quit the old menu app and open `ItlWiFi7922.app`. It runs in the menu bar. Wait for the first scan, select a WPA2 network and enter its password.
 
-The default mode already performs full connection setup; no boot arguments are required. The menu's link rate is a capability estimate, not measured throughput.
+The default mode already performs full connection setup; no boot arguments are required. The link rate shown in the menu is an estimate.
 
 Saved passwords are stored as plaintext in `~/Library/Application Support/ItlWiFi7922/networks.json`, with file mode `0600` in a `0700` directory. Do not include that file in reports.
 
