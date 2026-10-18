@@ -3,10 +3,10 @@
 <plist version="1.0"><dict><key>Kernel</key><dict><key>Add</key><array><dict>
 <key>Arch</key><string>x86_64</string>
 <key>BundlePath</key><string>itlmt7922.kext</string>
-<key>Comment</key><string>MT7922 full experimental port 0.2.1; Ethernet backend + ItlWiFi7922</string>
+<key>Comment</key><string>MT7922 full experimental port 0.2.2; Ethernet backend + ItlWiFi7922</string>
 <key>Enabled</key><true/>
 <key>ExecutablePath</key><string>Contents/MacOS/itlmt7922</string>
-<key>MaxKernel</key><string>24.99.99</string>
-<key>MinKernel</key><string>24.0.0</string>
+<key>MaxKernel</key><string></string>
+<key>MinKernel</key><string></string>
 <key>PlistPath</key><string>Contents/Info.plist</string>
 </dict></array></dict></dict></plist>

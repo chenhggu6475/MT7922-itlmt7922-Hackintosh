@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 """Package an existing standalone build without including machine configuration."""
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import plistlib
@@ -10,6 +11,9 @@ import subprocess
 import zipfile
 
 root=Path(__file__).resolve().parents[1]
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--dist',type=Path,help='Output directory (default: repository dist/)')
+args=parser.parse_args()
 info=plistlib.loads((root/'src/Info.plist').read_bytes())
 version=info['CFBundleVersion']
 assert plistlib.loads((root/'build/itlmt7922.kext/Contents/Info.plist').read_bytes())==info
@@ -20,8 +24,8 @@ assert version.encode()+b'\0' in binary
 for firmware in sorted((root/'fw').glob('*.bin')):
     assert binary.count(firmware.read_bytes())==1,firmware.name
 subprocess.run(['codesign','--verify','--deep','--strict',str(root/'build/ItlWiFi7922.app')],check=True)
-dist=root/'dist'
-dist.mkdir(exist_ok=True)
+dist=args.dist.resolve() if args.dist else root/'dist'
+dist.mkdir(parents=True,exist_ok=True)
 name='itlmt7922-'+version
 package=dist/name
 if package.exists():shutil.rmtree(package)
