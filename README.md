@@ -6,11 +6,15 @@ An experimental MT7922 / RZ616 Wi-Fi driver for **macOS 15 on x86_64**, ported f
 
 This repository packages the Wi-Fi driver and companion **ItlWiFi7922.app** separately to make building, installation and feedback easier. The current release baseline is **0.2.1**: macOS sees an Ethernet interface, while the menu bar app scans for and joins networks.
 
+The `enterprise-auth` branch contains experimental MT7922 enterprise-authentication support for WPA-EAP networks such as PEAP/MSCHAPv2. The enterprise test app is distributed separately as a GitHub Release asset; usernames and passwords are entered locally and are not stored in this repository.
+
 **The original author implemented the macOS driver framework, connection flow, protocol helpers and menu app. This project's main work is adapting the hardware and firmware protocols to the MT7922's Connac2 architecture, followed by throughput fixes after connectivity was established.** Original author and third-party notices are preserved.
 
 ## Current test results
 
 Version 0.2.1 has been tested on **MT7922 / RZ616 (PCI `14c3:0616`), macOS 15.8.1 / 24H32, and a 5 GHz WPA2 network**: scanning, joining, DHCP, downloads and uploads worked. Throughput was comparable to my M1 Mac.
+
+The enterprise branch has also been tested with eduroam PEAP/MSCHAPv2 authentication and Internet access on the same machine. It remains experimental: DHCP can be delayed after some network switches, firmware crashes may still occur during long runs, and Bluetooth, the native macOS Wi-Fi UI, and long-term stability are outside its guarantee.
 
 | Item | Current scope |
 | --- | --- |
