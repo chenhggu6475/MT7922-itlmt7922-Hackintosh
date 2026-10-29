@@ -14,12 +14,17 @@
 #include "itl_caps.h"
 #include "itl_ba.h"
 #include "itl_native_bridge.h"
+#include "itl_enterprise_abi.h"
+#include "enterprise_channel.hpp"
+#include "itl_tx_receipt.h"
+#include "itl_enterprise_rekey.h"
 
 class itlmt7922Eth;
 class IOUserClient;
 
 // Per-frame options for m3Tx (everything defaults to the verified legacy behaviour: fixed 6 Mb/s, management queue)
 struct M3TxOpt {
+    bool receipt = false;    // track this worker-owned handshake TX completion
     bool protect = false;     // encrypt (Protected Frame bit; the hardware adds the CCMP header)
     bool rateAdapt = false;   // no FIXED_RATE: the firmware's rate control chooses the MCS
     uint8_t tid = 0;          // TXD1.TID: 0 normal, 2 = MT_TX_ADDBA for an ADDBA request
@@ -67,11 +72,31 @@ public:
     // Runtime control from user space (itlmt7922_uc.cpp, ABI in itl_uc_abi.h): the worker thread picks the commands up.
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties,
                            IOUserClient **handler) override;
+    IOReturn epCall(uintptr_t owner, uint32_t selector, const void *input, size_t length, itl_ep_reply *out);
+    void epClose(uintptr_t owner);
     IOReturn ucScan();
-    IOReturn ucJoin(const char *ssid, const char *psk);
+    IOReturn ucJoin(const char *ssid, const char *psk, bool open = false);
     IOReturn ucDisconnect();
 
 private:
+    enterprise::Channel epChannel;
+    uintptr_t epOwner = 0;
+    uint64_t epEpoch = 0;
+    uint32_t epState = 0;
+    bool m3Enterprise = false, epPmkReady = false;
+    bool epServicing = false;
+    ItlEnterpriseRekey epRekey;
+    static constexpr uint16_t M3_BMC_WCID = 19; // MT792x_WTBL_RESERVED - BSS index 0
+    uint32_t epGroupUpdates = 0, epKeyRetries = 0, epKeyRejects = 0;
+    uint8_t epPmk[32] = {};
+    uint8_t epRequestRsn[256] = {}, epApRsn[256] = {}, epBssid[6] = {};
+    uint32_t epRequestRsnLen = 0, epApRsnLen = 0;
+    enterprise::Frame epFrame; // worker scratch, avoids a >4KB kernel stack object
+    bool epService();
+    bool epGroupService();
+    void epAbort(bool cancelledOnly = false);
+    void epReceive(const uint8_t *source, const uint8_t *data, uint32_t length);
+    int epAuthenticate();
     bool busMasterOn = false;
     bool quiesceHardware();
     bool stopping = false, workerRunning = false, firmwareFault = false;
@@ -183,10 +208,15 @@ private:
     volatile bool rocGrant = false;
     uint8_t rocTok = 0, rocStatus = 0xff;
     uint8_t m3cipher = 0;                    // 0 = open, 4 = CCMP (BSS_INFO sec TLV)
+    bool m3Open = false;                    // explicit requested policy, never inferred from a missing key
+    bool m3SessionActive = false;           // setup began; teardown is idempotent
+    bool m3StaPresent = false;              // firmware AP record needs explicit deletion
+    bool m3SetupRecoveryUsed = false;       // at most one setup recovery per join/link
+    int m3StaRemove();
     uint8_t apSupp = 0, apBasic = 0;         // OFDM rate bitmaps (6,9,12,18,24,36,48,54 -> bit 0..7)
     uint8_t apCck = 0, apBasicCck = 0;       // 2.4 GHz CCK rate bitmaps (1,2,5.5,11 -> bit 0..3)
-    uint8_t apRsn[64] = {0};
-    uint8_t apRsnLen = 0;
+    uint8_t apRsn[256] = {0};
+    uint16_t apRsnLen = 0;
     char m3buf[3000] = {0};
     size_t m3len = 0;
     char m3res[400] = {0};
@@ -223,13 +253,14 @@ private:
     volatile bool m3linkUp = false;
     itlmt7922Eth *eth = nullptr;
     IOLock *txLock = nullptr;
+    ItlTxReceipt epTxReceipt;
     uint32_t stRxData = 0, stRxEapol = 0, stRxEth = 0, stRxDrop = 0, stTx = 0, stTxFail = 0, stNote = 0;
     int  m3Handshake();
     bool m3Eapol(const uint8_t *eapol, uint32_t len);
     int  m3Key(uint16_t wcid, bool pairwise, uint8_t keyId, const uint8_t *key, uint8_t keyLen);
     bool m3RxData(const uint8_t *p, uint32_t len);
     bool m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect,
-                  bool *full = nullptr);
+                  bool *full = nullptr, bool receipt = false);
     void m3Note(const char *dir, const uint8_t *eth, uint32_t len);
     // Post-mortem: the last Ethernet frames in either direction and one line of chip / ring / PCIe state, published as the
     // properties "wifi-frames" and "wifi-postmortem" when the firmware stops answering. chipRecover() redoes M1 + M2.
@@ -414,7 +445,7 @@ private:
     // ---- runtime control: command mailbox, supervisor loop, status for the menu bar app (itlmt7922_uc.cpp) ----
     enum { CMD_SCAN = 1, CMD_JOIN = 2, CMD_DISCONNECT = 4 };
     // hasPmk: `pmk` is the ready pairwise master key (native Wi-Fi: userland's supplicant derived it), psk is empty then
-    struct Net { char ssid[33]; char psk[72]; bool hasPmk; bool native; uint8_t pmk[32]; };
+    struct Net { char ssid[33]; char psk[72]; bool hasPmk; bool native; uint8_t pmk[32]; bool open; bool enterprise; uint64_t enterpriseEpoch; uint16_t rsnLength; uint8_t rsn[256]; };
     IOLock *cmdLock = nullptr;
     volatile uint32_t cmdBits = 0;
     Net reqNet = {};                         // the network of the last join command (under cmdLock)

@@ -3,6 +3,7 @@
 // MT7922 / Connac2 TXWI, shared hardware TXP, deterministic raw 802.11 RX.
 #include "itlmt7922.hpp"
 #include "mt7922_regs.h"
+#include "itl_security.h"
 #include "../codec/mt7922_rx_codec.h"
 #include "../codec/mt7922_data_codec.h"
 #include "../codec/mt7922_tx_codec.h"
@@ -50,6 +51,7 @@ bool itlmt7922::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type,
     // without it. A callback queued before teardown must not send even EAPOL
     // into a new association attempt after waiting for this lock.
     if (type == 2 && !m3linkUp && (o.full || !isEapol(frame, len))) return false;
+    if (type == 2 && o.full && o.protect == m3Open) return false;
     if ((txData.head + 1) % txData.n == (int)(rd(txData.regs + Q_DMA_IDX) & 0xffff)) {
         stTxNoSlot++;
         if (o.full) { *o.full = true; ethStalled = true; ethStallMs = nowMs(); }
@@ -93,6 +95,7 @@ bool itlmt7922::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type,
     put32(desc + 4, MT_DMA_CTL_SD_LEN0(64) | MT_DMA_CTL_LAST_SEC0);
     txData.head = (txData.head + 1) % txData.n;
     barrier();
+    if (o.receipt) epTxReceipt.arm(token);
     wr(txData.regs + Q_CPU_IDX, (uint32_t)txData.head);
     // Payload ownership ends at TXFREE, not at DMA descriptor consumption.
     return true;
@@ -177,9 +180,10 @@ bool itlmt7922::m3RxData(const uint8_t *p, uint32_t len)
         if (reorder) itl_reorder_rx(&rxBa[tid].r, sn, nullptr, 0, nowMs(), baDeliverCb, this);
         return true;
     }
-    // Protected ciphertext is rejected before LLC parsing; cleartext is only
-    // admitted for EAPOL during the WPA2 handshake, never as IP/DHCP/ARP.
-    if (!data.protected_frame && (status == MT7922_DATA_AMSDU || data.ethertype != 0x888e)) {
+    // Explicitly open associations admit clear data only after link-up.
+    // WPA2 retains its original gate against plaintext IP/DHCP/ARP injection.
+    if (!itl_rx_security_allowed(m3Open, m3linkUp, data.protected_frame,
+                                 status == MT7922_DATA_AMSDU, data.ethertype)) {
         stRxDrop++;
         stRxCipherReject++;
         return true;
@@ -220,7 +224,8 @@ bool itlmt7922::m3RxData(const uint8_t *p, uint32_t len)
     const uint8_t *body = f + data.body_offset;
     if (data.ethertype == 0x888e) {
         stRxEapol++;
-        if (m3wantEapol) m3Eapol(body, data.body_length);
+        if (m3Enterprise) epReceive(f + 10, body, data.body_length);
+        else if (m3wantEapol) m3Eapol(body, data.body_length);
         return true;
     }
     if (!m3linkUp || data.body_length > 1600) { stRxDrop++; stRxDirectDrop++; return true; }

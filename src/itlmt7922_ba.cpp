@@ -361,6 +361,7 @@ void itlmt7922::m3TxFree(const uint8_t *p, uint32_t len)
             const uint32_t s = id & (kTxSlots - 1);
             if (txIsBusy(s) && txGen[s] == (id >> 8)) {
                 txClrBusy(s);
+                epTxReceipt.complete(record.token, record.status);
                 stTxFree++;
                 txFreeSeen = true;
                 stTxFwRetry += record.attempts ? record.attempts - 1 : 0;

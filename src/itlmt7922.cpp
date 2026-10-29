@@ -172,7 +172,10 @@ bool itlmt7922::start(IOService *provider)
     if (!workerLock || !txLock || !cmdLock || !nativeLock) return false;
     uint32_t nativeDP = 0;
     nativeMode = PE_parse_boot_argn("mt7922_native_dp", &nativeDP, sizeof(nativeDP)) && nativeDP;
-    setProperty("port-version","0.2.2-full-experimental");
+    setProperty("port-version","0.2.2-enterprise-dev4-20261028");
+    setProperty("wifi-enterprise-features","gtk-rekey-zero-rsc,m3-retry-no-reinstall");
+    setProperty("wifi-open-supported", true);
+    setProperty("wifi-enterprise-abi", ITL_EP_ABI, 32);
     setProperty("wifi-state", "off");                         // until stage 3 establishes a link
 
     pci = OSDynamicCast(IOPCIDevice, provider);

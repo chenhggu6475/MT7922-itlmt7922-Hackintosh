@@ -10,6 +10,9 @@
 #include "itlmt7922.hpp"
 #include "mt7922_regs.h"
 #include "itl_wpa.h"
+#include "itl_security.h"
+#include "itl_session.h"
+#include "itl_enterprise_policy.h"
 #include "../codec/mt7922_data_codec.h"
 
 #include <string.h>
@@ -31,13 +34,7 @@ void itlmt7922::m3log(const char *fmt, ...)
     vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     IOLog("itlmt7922: M3 %s\n", tmp);
-    size_t n = strlen(tmp);
-    if (m3len + n + 2 < sizeof(m3buf)) {
-        memcpy(m3buf + m3len, tmp, n);
-        m3len += n;
-        m3buf[m3len++] = ';';
-        m3buf[m3len] = 0;
-    }
+    itl_log_append(m3buf, sizeof(m3buf), m3len, tmp);
     setProperty("m3-log", m3buf);
     nvramLog(tmp);                            // last step survives a hang or reboot (variable itlmt7922-log)
     nvramChunks(m3buf);                       // and the whole log (itlk0..itlk4)
@@ -56,6 +53,10 @@ void itlmt7922::m3Publish(const char *stage)
 void itlmt7922::m3Capture(const uint8_t *frame, uint32_t len, const char *ssid, uint8_t ch)
 {
     if (!m3On || !m3ssid[0] || len < 36 || strcmp(ssid, m3ssid) != 0) return;
+    // Choose only an AP of the explicitly requested security type, even if
+    // different BSSes advertise the same SSID.
+    if (m3Enterprise ? !itl_ep_ap((uint16_t)(frame[34] | (frame[35] << 8)), frame+36, len-36) :
+        !itl_ap_matches_security(m3Open, (uint16_t)(frame[34] | (frame[35] << 8)), frame+36, len-36)) return;
     // prefer 5 GHz; otherwise keep the first one seen
     if (tgtFound && !(ch > 14 && tgtCh <= 14)) return;
     tgtFound = true;
@@ -75,7 +76,6 @@ static inline void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static inline void put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
 
 #define M3_BSS_IDX     0
-#define M3_BMC_WCID    19                   // MT792x_WTBL_RESERVED - bss idx
 #define M3_AP_WCID     1
 
 #define UNI_STA_REC_UPDATE   0x03
@@ -119,6 +119,7 @@ int itlmt7922::m3PumpOnce()
     uint32_t before = rxPkts + evCount;
     rxDataPoll();
     ethFlush();
+    if (m3Enterprise) epService();
     return (rxPkts + evCount) != before;
 }
 
@@ -181,7 +182,7 @@ void itlmt7922::m3ParseAp()
                 for (int k = 0; k < 4; k++)
                     if ((ie[2 + i] & 0x7f) == rcck[k]) { apCck |= 1u << k; if (ie[2 + i] & 0x80) apBasicCck |= 1u << k; }
         } else if (id == 48 && l <= sizeof(apRsn) - 2) {
-            apRsnLen = (uint8_t)(l + 2);
+            apRsnLen = (uint16_t)(l + 2);
             memcpy(apRsn, ie, apRsnLen);
         }
         ie += 2 + l;
@@ -535,13 +536,13 @@ int itlmt7922::m3Auth()
 
 int itlmt7922::m3Assoc()
 {
-    uint8_t f[320];
+    uint8_t f[640];
     m3Hdr(f, 0x00, tgtBssid, mac);
     uint8_t *p = f + 24;
     // 2.4 GHz: advertise the CCK rates the AP's basic set usually contains also on the legacy path (an AP whose basic rates are
     // 1/2/5.5/11 refuses a station that offers OFDM only)
     bool g2 = tgtCh <= 14;
-    put16(p, g2 ? 0x0431 : 0x0411); p += 2;                     // ESS | PRIVACY | short slot (| short preamble on 2.4 GHz)
+    put16(p, itl_assoc_capability(m3Open, g2)); p += 2;
     put16(p, 10); p += 2;                                        // listen interval
     uint8_t sl = (uint8_t)strlen(m3ssid);
     *p++ = 0; *p++ = sl; memcpy(p, m3ssid, sl); p += sl;
@@ -550,9 +551,8 @@ int itlmt7922::m3Assoc()
     static const uint8_t ext2g[4] = {0x30, 0x48, 0x60, 0x6c};                               // 24, 36, 48, 54
     *p++ = 1; *p++ = 8; memcpy(p, g2 ? rates2g : rates, 8); p += 8;
     if (g2) { *p++ = 50; *p++ = 4; memcpy(p, ext2g, 4); p += 4; }
-    static const uint8_t rsn[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
-                                    0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
-    memcpy(p, rsn, sizeof(rsn)); p += sizeof(rsn);
+    if (m3Enterprise) { memcpy(p, epRequestRsn, epRequestRsnLen); p += epRequestRsnLen; }
+    else p += itl_assoc_security_ie(m3Open, p);
     if (fastActive) {
         p += itl_caps_build_ht(p);
         if (apCaps.vht) p += itl_caps_build_vht(p, fastAllow160);
@@ -573,12 +573,17 @@ int itlmt7922::m3Assoc()
 // ---------------------------------------------------------------------------------------------
 int itlmt7922::m3Run1()
 {
+    // Clean a previous partial attempt while its BSSID/channel are still current.
+    if (m3SessionActive) m3Teardown();
+    if (recoverWanted) return ITL_EIO;
     m3log("armed");
     m3stepDown = m3stepRadio = false;                        // per-attempt state (an earlier attempt may have failed half way)
     m3reachedAssoc = false;
     m3cipher = 0;
     m3dataOn = false;
     m3linkUp = false;
+    m3Open = false;
+    m3Enterprise = false;
     m3wantEapol = false;
     m3eapolLen = 0;
     m3eapolHead = m3eapolTail = m3eapolDrops = 0;
@@ -613,6 +618,8 @@ int itlmt7922::m3Run1()
         for (int k = 0; k < no && sel < 0 && !shouldStop() && !firmwareFault && !cmdPending(CMD_JOIN | CMD_DISCONNECT); k++) {
             int i = order[k];
             strlcpy(m3ssid, nets[i].ssid, sizeof(m3ssid));
+            m3Open = nets[i].open;
+            m3Enterprise = nets[i].enterprise;
             tgtFound = false;
             m3log("scan #%d for net%d (directed)", attempt, i + 1);
             m2Scan(m3ssid);
@@ -624,6 +631,24 @@ int itlmt7922::m3Run1()
     if (sel < 0) { m3log("no configured network seen in the scan"); return ITL_EIO; }
     strlcpy(m3ssid, nets[sel].ssid, sizeof(m3ssid));
     strlcpy(m3psk, nets[sel].psk, sizeof(m3psk));
+    m3Open = nets[sel].open;
+    m3Enterprise = nets[sel].enterprise;
+    if (m3Enterprise) {
+        IOLockLock(cmdLock);
+        bool current = epOwner && epEpoch == nets[sel].enterpriseEpoch && epState == 1;
+        if (current) {
+            epRequestRsnLen = nets[sel].rsnLength;
+            memcpy(epRequestRsn, nets[sel].rsn, epRequestRsnLen);
+            memcpy(epBssid, tgtBssid, sizeof(epBssid));
+        }
+        IOLockUnlock(cmdLock);
+        if (!current) return ITL_EIO;
+    }
+    if (m3Enterprise ? !itl_ep_ap(tgtCap,tgtIe,tgtIeLen) : !itl_ap_matches_security(m3Open, tgtCap, tgtIe, tgtIeLen)) {
+        m3Publish("security-fail");
+        return ITL_EINVAL;
+    }
+    setProperty("wifi-security", m3Enterprise ? "enterprise" : (m3Open ? "open" : "wpa2"));
     // candNets stays: the fall-back ladder in m3Run() calls this again for the next level; m3Supervise() wipes it afterwards
     m3log("selected net%d ssid len=%u", sel + 1, (unsigned)strlen(m3ssid));
     m3log("target %02x:%02x:%02x:%02x:%02x:%02x ch=%u cap=%04x bi=%u ies=%u", tgtBssid[0], tgtBssid[1], tgtBssid[2],
@@ -638,25 +663,45 @@ int itlmt7922::m3Run1()
     }
 
     // PMK now (4096 PBKDF2 iterations), kept for the 4-way handshake; native Wi-Fi hands over the key its supplicant derived
-    uint8_t pmk[32];
-    if (nets[sel].hasPmk) memcpy(pmk, nets[sel].pmk, sizeof(pmk));
-    else itl_wpa_pmk(m3psk, (const uint8_t *)m3ssid, strlen(m3ssid), pmk);
+    uint8_t pmk[32] = {};
+    if (!m3Open && !m3Enterprise) {
+        if (nets[sel].hasPmk) memcpy(pmk, nets[sel].pmk, sizeof(pmk));
+        else itl_wpa_pmk(m3psk, (const uint8_t *)m3ssid, strlen(m3ssid), pmk);
+    }
     memcpy(m3pmk, pmk, sizeof(m3pmk));
     bzero(pmk, sizeof(pmk));
-    m3log("pmk ready");
-    m3Publish("pmk");
+    m3log(m3Open ? "open network: no PSK or EAPOL key handshake" : "pmk ready");
+    m3Publish(m3Open ? "open-prep" : "pmk");
 
     // step 2: firmware / hardware prep, BSS + STA records in the "not associated" state, ROC on the AP's channel
     m3ParseAp();
     int prepRc = m3HwPrep();
     if (prepRc) { m3Publish("hw-prep-fail"); return prepRc; }
+    m3SessionActive = true;
     int setupRc=m3Bss(false);
-    if (!setupRc) setupRc=m3Sta(0,true,0);
-    if (!setupRc) setupRc=m3Roc(true);
-    if (setupRc) return setupRc;
+    const char *setupStage = "bss-fail";
+    if (!setupRc) {
+        setupStage = "sta-fail";
+        setupRc=m3Sta(0,true,0);
+        if (!setupRc) m3StaPresent = true;
+    }
+    if (!setupRc) { setupStage = "roc-setup-fail"; setupRc=m3Roc(true); }
+    if (setupRc) {
+        m3Publish(setupStage);
+        evLog("setup failed: %s rc=%d", setupStage, setupRc);
+        setProperty("wifi-setup-error", setupStage);
+        m3Teardown();
+        // A firmware rejection may leave uncertain state. Use the existing
+        // quiesced reset path once, not an unbounded reconnect/reset loop.
+        if (!m3SetupRecoveryUsed && !shouldStop()) {
+            m3SetupRecoveryUsed = true;
+            recoverWanted = true;
+        }
+        return setupRc;
+    }
     for (int i = 0; i < 1000 && !rocGrant && !shouldStop() && !firmwareFault; i++) m3Pump(1);
     m3log("roc grant=%d status=%u", rocGrant ? 1 : 0, rocStatus);
-    if (!rocGrant || rocStatus != 0) { m3Publish("roc-fail"); m3Roc(false); return ITL_EIO; }
+    if (!rocGrant || rocStatus != 0) { m3Publish("roc-fail"); m3Teardown(); return ITL_EIO; }
 
     // step 3: open-system authentication and association, both on the channel held by the ROC
     m3log("sta mac %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -672,9 +717,19 @@ int itlmt7922::m3Run1()
     if (!rc) {
         rc=m3Bss(true);
         if (!rc) rc=m3Sta(2,false,m3aid);
-        if (!rc) rc=m3Handshake();
+        if (!rc) {
+            if (m3Open) {
+                // WTBL RESET_AND_SET above resets the AP and broadcast records.
+                // No PTK/GTK installation, and no Protected bit on data TX.
+                bzero(m3ptk, sizeof(m3ptk));
+                m3dataOn = true;
+                removeProperty("wifi-pmkid-match");
+                setProperty("wifi-handshake", "open: no key handshake");
+            } else if (m3Enterprise) rc=epAuthenticate();
+            else rc=m3Handshake();
+        }
         m3wantEapol = false;
-        m3Publish(rc ? "hs-fail" : "hs-ok");
+        m3Publish(rc ? "hs-fail" : (m3Open ? "open-ok" : "hs-ok"));
     }
     m3Roc(false);
     bzero(m3pmk, sizeof(m3pmk));
@@ -688,6 +743,7 @@ int itlmt7922::m3Run1()
         baLog("lvl %u: assoc/handshake rc=%d", lvl, rc);
         evLog("lvl %u: association/handshake failed rc=%d", lvl, rc);
     }
+    m3Teardown();
     return rc;
 }
 
@@ -700,7 +756,13 @@ int itlmt7922::m3Run()
     lvl = m3fast ? (fastLevel < lvlCap ? fastLevel : lvlCap) : 0;
     for (; !shouldStop() && !firmwareFault;) {
         int rc = m3Run1();
-        if (!m3stepDown || lvl == 0) return rc;
+        if (m3Enterprise || recoverWanted || !m3stepDown || lvl == 0) {
+            // m3Link can return for a watchdog/level change without tearing
+            // down. Retire radio state before the supervisor releases the EAP
+            // owner; otherwise m3SessionActive makes every future JOIN busy.
+            m3Teardown();
+            return rc;
+        }
         uint8_t next = lvl - 1;
         const bool forced = lvlForce != 0;                   // run-time control (itl_lvl): exactly the level asked for
         if (forced) {
@@ -725,23 +787,45 @@ int itlmt7922::m3Run()
             capBand = tgtCh <= 14 ? 1 : 2;
         }
     }
+    m3Teardown();
     return ITL_EIO;
+}
+
+int itlmt7922::m3StaRemove()
+{
+    uint8_t request[40];
+    const size_t length = itl_sta_remove_message(request, sizeof(request), tgtBssid);
+    return length ? m3Cmd(UNI_STA_REC_UPDATE, request, length, "sta(remove)") : ITL_EINVAL;
 }
 
 void itlmt7922::m3Teardown()
 {
     m3linkUp = false;
+    epRekey.reset();
     ethLink(false);
+    m3wantEapol = false;
+    if (!m3SessionActive) { m3dataOn=false; return; }
     if (shouldStop() || firmwareFault) { m3dataOn=false; return; }
     baReset();
     uint8_t f[26];
     m3Hdr(f, 0xc0, tgtBssid, mac);                           // deauthentication, reason 3: station is leaving
     put16(f + 24, 3);
     m3Tx(f, sizeof(f), 0, 12);
-    IOSleep(100);
-    m3Bss(false);                                            // BSS back to "not connected"
+    m3Pump(100);                                            // drain TX completions before record removal
+    const int rocRc = m3Roc(false);                         // release any pending channel request
+    const int staRc = m3StaPresent ? m3StaRemove() : 0;
+    if (!staRc) m3StaPresent = false;
+    const int bssRc = m3Bss(false);
+    m3SessionActive = false;
+    evLog("teardown roc=%d sta=%d bss=%d", rocRc, staRc, bssRc);
+    if ((rocRc || staRc || bssRc) && !m3SetupRecoveryUsed) {
+        m3SetupRecoveryUsed = true;
+        recoverWanted = true;
+    }
     m3dataOn = false;
     m3cipher = 0;
+    bzero(m3ptk, sizeof(m3ptk));
+    // Enterprise ownership is released by the supervisor after all cleanup.
     IOSleep(100);
 }
 
@@ -832,6 +916,7 @@ bool itlmt7922::chipRecover()
     m3hw = false;                                            // a reloaded firmware has none of the one-time setup (fw_log, efuse, RTS): redo it
     clcCc[0] = 0;                                            // ... nor the CLC / SKU power tables
     if (shouldStop() || !quiesceHardware()) return false;
+    m3SessionActive = m3StaPresent = false;
     firmwareFault=false;
     int rc = m1Run();
     m3log("recover: M1 rc=%d", rc);
@@ -945,7 +1030,7 @@ uint32_t itlmt7922::m3RxAmsdu(const uint8_t *b, uint32_t n, uint8_t ai, bool reo
 // the hardware once the keys are installed). EAPOL goes to the handshake, everything else to the Ethernet interface.
 // The header sits after up to 32 + 4 x 16 + 96 bytes of RXD groups (mt7922_mac_fill_rx), so look for it from byte 32 on.
 
-bool itlmt7922::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect, bool *full)
+bool itlmt7922::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect, bool *full, bool receipt)
 {
     uint8_t f[34 + 1560];
     if (plen > 1560) return false;
@@ -963,6 +1048,7 @@ bool itlmt7922::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *p
     o.protect = protect;
     o.rateAdapt = ra;
     o.full = full;
+    o.receipt = receipt;
     if (ra) o.qidx = 1; // Connac2 AC_BE mapping applies before TX Block Ack too.
     uint16_t sn = txSn;
     if (ra && lvl >= 3) {
@@ -991,7 +1077,7 @@ int itlmt7922::ethTx(const uint8_t *e, uint32_t len)
 {
     if (!m3linkUp || len < 14) return -1;
     bool full = false;
-    bool ok = m3TxData(e, be16p(e + 12), e + 14, len - 14, true, &full);
+    bool ok = m3TxData(e, be16p(e + 12), e + 14, len - 14, !m3Open, &full);
     if (full) return 1;
     if (isBigEcho(e, len, 8)) icmpReqTx++;
     if (ok) stTx++; else stTxFail++;
@@ -1042,16 +1128,26 @@ bool itlmt7922::m3EapolNext()
 
 int itlmt7922::m3Handshake()
 {
-    static const uint8_t rsnIe[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    static const uint8_t personalRsnIe[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
                                       0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
-    uint8_t snonce[32], zero[32], replay[8] = {}, anonce[32] = {}, out[160], kd[8 * 40];
+    const uint8_t *rsnIe = m3Enterprise ? epRequestRsn : personalRsnIe;
+    const size_t rsnIeLen = m3Enterprise ? epRequestRsnLen : sizeof(personalRsnIe);
+    uint8_t snonce[32], zero[32], replay[8] = {}, anonce[32] = {}, out[512], kd[8 * 40];
     itl_eapol_key k;
     itl_ptk ptk = {};
+    uint8_t gtk[32] = {}, gtkId = 0, gtkLen = 0;
+    struct SecretScope {
+        void *ptk, *nonce, *data, *gtk;
+        ~SecretScope(){
+            enterprise::erase(ptk,sizeof(itl_ptk));enterprise::erase(nonce,32);
+            enterprise::erase(data,8*40);enterprise::erase(gtk,32);
+        }
+    } secretScope{&ptk,snonce,kd,gtk};
     bzero(zero, sizeof(zero));
     read_random(snonce, sizeof(snonce));
     m3dataOn = true;
     m3eapolLen = 0;
-    m3eapolHead = m3eapolTail = m3eapolDrops = 0;
+    if (!m3Enterprise) m3eapolHead = m3eapolTail = m3eapolDrops = 0;
     m3hsApLeave = false;
     m3hsApReason = 0;
     removeProperty("wifi-pmkid-match");
@@ -1072,7 +1168,8 @@ int itlmt7922::m3Handshake()
     };
     // Six seconds for M1 and, after the first M1, six for M3. Retransmitted M1s
     // do not extend the deadline. Each one gets a response with ITS counter and ANonce.
-    while ((uint32_t)(nowMs() - phaseStart) < 6000 && !got3 && !m3hsApLeave && !shouldStop() && !firmwareFault) {
+    while ((uint32_t)(nowMs() - phaseStart) < 6000 && !got3 && !m3hsApLeave && !shouldStop() && !firmwareFault &&
+           !cmdPending(CMD_JOIN | CMD_DISCONNECT)) {
         m3Pump(1);
         if (m3hsApLeave) break;
         while (m3EapolNext()) {
@@ -1081,6 +1178,7 @@ int itlmt7922::m3Handshake()
             m3log("eapol rx info=%04x len=%u replay=%02x%02x%02x%02x%02x%02x%02x%02x",
                   k.info, m3eapolLen, k.replay[0], k.replay[1], k.replay[2], k.replay[3],
                   k.replay[4], k.replay[5], k.replay[6], k.replay[7]);
+            if (m3Enterprise && (k.keylen != 16 || (k.info & 0xe030))) { rejected++; continue; }
             const uint16_t required = ITL_KI_PAIRWISE | ITL_KI_ACK;
             if ((k.info & ITL_KI_VER_MASK) != 2 || (k.info & required) != required ||
                 (k.info & (ITL_KI_ERROR | ITL_KI_REQUEST))) {
@@ -1123,7 +1221,7 @@ int itlmt7922::m3Handshake()
                 if (changed) itl_wpa_ptk(m3pmk, tgtBssid, mac, anonce, snonce, &ptk);
                 have1 = true;
                 m1Count++;
-                n2 = itl_eapol_build(out, 0x010a, 0, replay, snonce, rsnIe, sizeof(rsnIe));
+                n2 = itl_eapol_build(out, 0x010a, 0, replay, snonce, rsnIe, (uint16_t)rsnIeLen);
                 itl_eapol_mic(ptk.kck, out, n2);
                 m3log("eapol m1 #%u anonceChanged=%u", m1Count, changed);
                 sendM2();
@@ -1134,6 +1232,8 @@ int itlmt7922::m3Handshake()
                 m3log("eapol rejected unexpected state/flags");
                 continue;
             }
+            if (m3Enterprise && (k.info & (ITL_KI_SECURE | ITL_KI_ENCRYPTED)) !=
+                (ITL_KI_SECURE | ITL_KI_ENCRYPTED)) { rejected++; continue; }
             if (memcmp(k.replay, replay, 8) <= 0 || memcmp(k.nonce, anonce, 32)) {
                 rejected++;
                 m3log("eapol m3 rejected replay/ANonce");
@@ -1166,11 +1266,14 @@ int itlmt7922::m3Handshake()
     m3log("eapol m3 info=%04x mic ok datalen=%u", k.info, k.datalen);
 
     // key data: wrapped RSN IE + GTK KDE
-    uint8_t gtk[32], gtkId = 0, gtkLen = 0;
     if ((k.info & ITL_KI_ENCRYPTED) && k.datalen >= 24 && k.datalen <= sizeof(kd) + 8 &&
         itl_aes128_unwrap(ptk.kek, k.data, k.datalen, kd) == 0) {
+        if (m3Enterprise) {
+            if (!itl_ep_keydata(kd,k.datalen-8,apRsn,apRsnLen,gtk,&gtkId)) return ITL_EIO;
+            gtkLen=16;
+        }
         const uint8_t *e = kd, *end = kd + k.datalen - 8;
-        while (e + 2 <= end && e + 2 + e[1] <= end) {
+        while (!m3Enterprise && e + 2 <= end && e + 2 + e[1] <= end) {
             if (e[0] == 0xdd && e[1] >= 22 && e[2] == 0x00 && e[3] == 0x0f && e[4] == 0xac && e[5] == 1) {
                 gtkLen = (uint8_t)(e[1] - 6);
                 if (gtkLen > sizeof(gtk)) gtkLen = 0;
@@ -1190,14 +1293,30 @@ int itlmt7922::m3Handshake()
     memcpy(replay3, k.replay, 8);
     size_t n4 = itl_eapol_build(out, 0x030a, 0, replay3, zero, nullptr, 0);
     itl_eapol_mic(ptk.kck, out, n4);
-    bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n4, false);
+    if (m3Enterprise) { M3Lock lock(txLock); epTxReceipt.reset(); }
+    bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n4, false, nullptr, m3Enterprise);
     m3log("eapol m4 tx %s", ok ? "queued" : "FAILED");
-    for (int i = 0; i < 30; i++) m3Pump(1);                    // let it go out in the clear before the keys arrive
+    if (m3Enterprise && ok) {
+        bool done = false, sent = false;
+        const uint32_t waitStarted = nowMs();
+        while (!done && nowMs()-waitStarted < 1000 && !shouldStop() && !firmwareFault &&
+               !cmdPending(CMD_JOIN | CMD_DISCONNECT)) {
+            m3Pump(1);
+            M3Lock lock(txLock);
+            done=epTxReceipt.finished();sent=epTxReceipt.succeeded();
+        }
+        { M3Lock lock(txLock); epTxReceipt.reset(); }
+        ok=done&&sent&&!m3lost&&!cmdPending(CMD_JOIN | CMD_DISCONNECT);
+        if (!ok) m3log("enterprise m4: no successful TX completion; refusing key install");
+    } else if (!m3Enterprise) {
+        for (int i = 0; i < 30; i++) m3Pump(1);
+    }
 
     m3cipher = 4;
     int bssRc = ok ? m3Bss(true) : ITL_EIO;
     int r1 = bssRc ? bssRc : m3Key(M3_AP_WCID, true, 0, ptk.tk, 16);
     int r2 = r1 ? r1 : m3Key(M3_BMC_WCID, false, gtkId, gtk, 16);
+    if(m3Enterprise&&!r1&&!r2)epRekey.begin(replay3,anonce,gtk,gtkId);
     memcpy(m3ptk, &ptk, sizeof(m3ptk));
     bzero(&ptk, sizeof(ptk));
     bzero(gtk, sizeof(gtk));
@@ -1228,7 +1347,17 @@ void itlmt7922::m3Link()
     txfWinFail = stTxFwFail;
     txfBad = 0;
     uint32_t lastTxf = nowMs();
-    m3linkUp = true;
+    if (m3Enterprise) {
+        IOLockLock(cmdLock);
+        epChannel.tick(nowMs());
+        bool valid = epOwner && epState == 3 && !epChannel.cleanup_required() &&
+                     !(cmdBits & (CMD_JOIN | CMD_DISCONNECT));
+        if (valid) { m3linkUp = true; epState = 4; }
+        IOLockUnlock(cmdLock);
+        if (!valid) { m3Teardown(); return; }
+    } else m3linkUp = true;
+    m3SetupRecoveryUsed = false;
+    removeProperty("wifi-setup-error");
     m3sleepy = true;
     uint32_t t0 = nowMs(), lastStat = 0, lastActive = t0;
     linkUpMs = t0;
@@ -1295,7 +1424,9 @@ void itlmt7922::m3Link()
         uint32_t up = (now - t0) / 1000;
         if (fastActive && !watchdogDone && up >= 15) {
             watchdogDone = true;
-            if (!stRxUni && stTx >= 2) {                     // we transmitted, and no unicast frame ever came back: HT/VHT is not working
+            // stTx includes traffic from prior networks. Broadcast DHCP/ARP
+            // cannot establish an HT/VHT unicast failure on this new link.
+            if (!stRxUni && stTxUni >= 2) {
                 baLog("lvl %u: no unicast rx in %us (tx=%u rxd=%u eth=%u)", lvl, up, stTx, stRxData, stRxEth);
                 evLog("lvl %u: no unicast frame received in %us tx=%u fail=%u fwfail=%u free=%u rxd=%u eapol=%u eth=%u", lvl, up,
                       stTx, stTxFail, stTxFwFail, stTxFree, stRxData, stRxEapol, stRxEth);

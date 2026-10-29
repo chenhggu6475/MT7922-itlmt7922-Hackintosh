@@ -29,7 +29,7 @@ mkdir -p build/obj "$kext/Contents/MacOS"
 cp src/Info.plist "$kext/Contents/Info.plist"
 objects=()
 sources=(itlmt7922 itlmt7922_m1 itlmt7922_m2 itlmt7922_m3 itlmt7922_txrx
-         itlmt7922_pwr itlmt7922_ctl itlmt7922_eth itlmt7922_ba itlmt7922_uc
+         itlmt7922_enterprise itlmt7922_pwr itlmt7922_ctl itlmt7922_eth itlmt7922_ba itlmt7922_uc
          itl_wpa itl_caps itl_ba)
 for name in "${sources[@]}"; do
     object="build/obj/$name.o"

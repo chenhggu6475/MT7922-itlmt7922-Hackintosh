@@ -8,6 +8,7 @@
 // user client's context.
 #include "itlmt7922.hpp"
 #include "itl_uc_abi.h"
+#include "itl_security.h"
 #include "../codec/mt7922_rx_codec.h"
 
 #include <IOKit/IOUserClient.h>
@@ -33,12 +34,15 @@ public:
     bool initWithTask(task_t owningTask, void *securityToken, UInt32 type, OSDictionary *properties) override;
     bool start(IOService *provider) override;
     IOReturn clientClose() override;
+    IOReturn clientDied() override;
+    void stop(IOService *provider) override;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
                             OSObject *target, void *reference) override;
 
 private:
     itlmt7922 *drv = nullptr;
     bool allowed = false;
+    bool admin = false;
 };
 
 #define super IOUserClient
@@ -48,6 +52,7 @@ bool itlmt7922UC::initWithTask(task_t owningTask, void *securityToken, UInt32 ty
 {
     if (!super::initWithTask(owningTask, securityToken, type, properties)) return false;
     // Like the system Wi-Fi menu: root, or the user logged in at the console. A remote (ssh) session of another user is refused.
+    admin = clientHasPrivilege(owningTask, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
     allowed = clientHasPrivilege(owningTask, kIOClientPrivilegeAdministrator) == kIOReturnSuccess ||
               clientHasPrivilege(owningTask, kIOClientPrivilegeLocalUser) == kIOReturnSuccess;
     return true;
@@ -61,8 +66,22 @@ bool itlmt7922UC::start(IOService *provider)
 
 IOReturn itlmt7922UC::clientClose()
 {
+    if (drv) drv->epClose((uintptr_t)this);
     terminate();
     return kIOReturnSuccess;
+}
+
+IOReturn itlmt7922UC::clientDied()
+{
+    if (drv) drv->epClose((uintptr_t)this);
+    return super::clientDied();
+}
+
+void itlmt7922UC::stop(IOService *provider)
+{
+    if (drv) drv->epClose((uintptr_t)this);
+    drv = nullptr;
+    super::stop(provider);
 }
 
 IOReturn itlmt7922UC::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *,
@@ -70,6 +89,13 @@ IOReturn itlmt7922UC::externalMethod(uint32_t selector, IOExternalMethodArgument
 {
     if (!drv || !a) return kIOReturnNotAttached;
     if (!allowed) return kIOReturnNotPrivileged;
+    if (selector >= ITL_EP_JOIN && selector <= ITL_EP_LEAVE) {
+        if (!admin) return kIOReturnNotPrivileged;
+        if (!a->structureInput || !a->structureOutput || a->structureOutputSize != sizeof(itl_ep_reply))
+            return kIOReturnBadArgument;
+        return drv->epCall((uintptr_t)this, selector, a->structureInput, a->structureInputSize,
+                           (itl_ep_reply *)a->structureOutput);
+    }
     switch (selector) {
     case kItlUcScan:
         return drv->ucScan();
@@ -81,7 +107,7 @@ IOReturn itlmt7922UC::externalMethod(uint32_t selector, IOExternalMethodArgument
         memcpy(&j, a->structureInput, sizeof(j));
         IOReturn r = kIOReturnBadArgument;
         size_t sl = strnlen(j.ssid, sizeof(j.ssid)), pl = strnlen(j.psk, sizeof(j.psk));
-        if (j.abi == ITL_UC_ABI_VERSION && sl >= 1 && sl <= 32 && pl >= 8 && pl <= 63) r = drv->ucJoin(j.ssid, j.psk);
+        if (itl_join_valid(j.abi, sl, pl)) r = drv->ucJoin(j.ssid, j.psk, j.abi == ITL_UC_OPEN_ABI_VERSION);
         bzero(&j, sizeof(j));
         return r;
     }
@@ -115,6 +141,7 @@ IOReturn itlmt7922::ucScan()
 {
     if (shouldStop() || !m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
     IOLockLock(cmdLock);
+    if (epOwner) { IOLockUnlock(cmdLock); return kIOReturnBusy; }
     uint32_t now = nowMs();
     IOReturn r = kIOReturnSuccess;
     if (lastScanReqMs && now - lastScanReqMs < 10000) r = kIOReturnBusy;     // a scan takes the radio off the AP's channel
@@ -123,14 +150,17 @@ IOReturn itlmt7922::ucScan()
     return r;
 }
 
-IOReturn itlmt7922::ucJoin(const char *ssid, const char *psk)
+IOReturn itlmt7922::ucJoin(const char *ssid, const char *psk, bool open)
 {
     if (shouldStop() || !m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
     IOLockLock(cmdLock);
+    if (epOwner) { IOLockUnlock(cmdLock); return kIOReturnBusy; }
+    bzero(&reqNet, sizeof(reqNet));
     strlcpy(reqNet.ssid, ssid, sizeof(reqNet.ssid));
     strlcpy(reqNet.psk, psk, sizeof(reqNet.psk));
     reqNet.hasPmk = false;
     reqNet.native = false;
+    reqNet.open = open;
     bzero(reqNet.pmk, sizeof(reqNet.pmk));
     cmdBits = (cmdBits & ~(uint32_t)CMD_DISCONNECT) | (uint32_t)CMD_JOIN;
     IOLockUnlock(cmdLock);
@@ -141,6 +171,7 @@ IOReturn itlmt7922::ucDisconnect()
 {
     if (shouldStop() || !m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
     IOLockLock(cmdLock);
+    if (epOwner) { IOLockUnlock(cmdLock); return kIOReturnBusy; }
     cmdBits = (cmdBits & ~(uint32_t)CMD_JOIN) | (uint32_t)CMD_DISCONNECT;
     bzero(&reqNet, sizeof(reqNet));
     IOLockUnlock(cmdLock);
@@ -279,6 +310,7 @@ IOReturn itlmt7922::nativeJoin(const ItlNativeJoin *j)
     if (shouldStop() || !m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
     if (!j || j->version != 1 || !j->ssidLen || j->ssidLen > 32) return kIOReturnBadArgument;
     IOLockLock(cmdLock);
+    if (epOwner) { IOLockUnlock(cmdLock); return kIOReturnBusy; }
     bzero(&reqNet, sizeof(reqNet));
     memcpy(reqNet.ssid, j->ssid, j->ssidLen);
     memcpy(reqNet.pmk, j->pmk, sizeof(reqNet.pmk));
@@ -504,12 +536,16 @@ int itlmt7922::loadPlistNets(Net *out, int max)
 
 static const char *failText(const char *stage)
 {
+    if (!strncmp(stage, "bss-fail", 8)) return "firmware rejected network setup";
+    if (!strncmp(stage, "sta-fail", 8)) return "firmware rejected access-point record setup";
+    if (!strncmp(stage, "roc-setup-fail", 14)) return "firmware rejected channel setup";
     if (!strncmp(stage, "nocred", 6)) return "no network configured";
     if (!strncmp(stage, "scan", 4)) return "network not found";
     if (!strncmp(stage, "roc-fail", 8)) return "radio did not get the channel";
     if (!strncmp(stage, "auth-fail", 9)) return "the access point refused authentication";
     if (!strncmp(stage, "assoc-fail", 10)) return "the access point refused association";
     if (!strncmp(stage, "hs-fail", 7)) return "key handshake failed";
+    if (!strncmp(stage, "security-fail", 13)) return "access point security does not match the requested network type";
     return "connection failed";
 }
 
@@ -548,6 +584,7 @@ void itlmt7922::m3Supervise()
         Net j;
         uint32_t c = cmdTake(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT, &j);
         if (c & CMD_DISCONNECT) {
+            epAbort(true); // also releases a cancelled join before association began
             want = false; haveUser = false; fails = 0; away = false; userNative = false;
             bzero(&user, sizeof(user));
             if (njState != ITL_NATIVE_FAILED) njState = ITL_NATIVE_IDLE;
@@ -555,6 +592,7 @@ void itlmt7922::m3Supervise()
             wifiState("idle", "");
         }
         if (c & CMD_JOIN) {
+            m3SetupRecoveryUsed = false;
             // Another network, or a cap learned more than 10 min ago: start from mt7922_fast again. The cap survives a disconnect
             // and a failed join of the same network (the Family retries from the start each time; every retry used to spend
             // 30+ s walking down the same ladder again).
@@ -586,7 +624,7 @@ void itlmt7922::m3Supervise()
             if (probeAll) lastProbeAll = now;
             candN = 0;
             if (haveUser && (fresh || probeAll || apInRange(user.ssid, 60000))) candNets[candN++] = user;
-            for (int i = 0; i < nb && candN < 4; i++) {
+            for (int i = 0; i < nb && candN < 4 && !user.enterprise; i++) {
                 if (haveUser && !strcmp(boot[i].ssid, user.ssid)) continue;
                 if (probeAll || apInRange(boot[i].ssid, 60000)) candNets[candN++] = boot[i];
             }
@@ -609,6 +647,13 @@ void itlmt7922::m3Supervise()
             bool wasUp = linkUpMs != up0;
             everUp |= wasUp;
             m3log("supervisor: attempt rc=%d up=%d lost=%d (%s)", rc, wasUp ? 1 : 0, m3lost ? 1 : 0, m3res);
+            if (user.enterprise) {
+                epAbort();
+                haveUser = false; want = false; userNative = false;
+                bzero(&user, sizeof(user));
+                wifiState("failed", "enterprise session ended; reconnect through the authentication client");
+                continue;
+            }
             if (recoverWanted && recoverCnt < 8) {                       // the firmware stopped answering: cold start again
                 recoverWanted = false;
                 bool ok = chipRecover();

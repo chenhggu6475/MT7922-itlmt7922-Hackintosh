@@ -13,10 +13,11 @@ import IOKit
 
 // ---- driver access -------------------------------------------------------------------------------------------------------
 struct WifiNet { let ssid: String; let channel: Int; let rssi: Int; let security: String
-    var joinable: Bool { security == "wpa2" || security == "wpa2/wpa3" }
+    var joinable: Bool { security == "open" || security == "wpa2" || security == "wpa2/wpa3" }
     var locked: Bool { security != "open" } }
 
 struct WifiStatus {
+    var openSupported = false
     var present = false, state = "absent", error = "", ssid = "", channel = 0, rssi = 0, rate = 0, scanGen = 0
     var nets: [WifiNet] = []
     var events: [String] = []                   // wifi-events: "<seconds since boot>s <what happened>", oldest first
@@ -35,6 +36,7 @@ enum Driver {
         func prop(_ k: String) -> Any? { IORegistryEntryCreateCFProperty(svc, k as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() }
         func num(_ k: String) -> Int { (prop(k) as? NSNumber).map { Int(Int32(truncatingIfNeeded: $0.int64Value)) } ?? 0 }
         s.present = true
+        s.openSupported = (prop("wifi-open-supported") as? NSNumber)?.boolValue ?? false
         s.state = prop("wifi-state") as? String ?? "off"
         s.error = prop("wifi-error") as? String ?? ""
         s.ssid = prop("wifi-ssid") as? String ?? ""
@@ -65,10 +67,11 @@ enum Driver {
         return kr
     }
 
-    static func join(ssid: String, psk: String) -> kern_return_t {
+    static func join(ssid: String, psk: String, open: Bool = false) -> kern_return_t {
         // struct itl_uc_join { uint32_t abi; char ssid[36]; char psk[68]; }
         var buf = [UInt8](repeating: 0, count: 4 + 36 + 68)
-        withUnsafeBytes(of: abi.littleEndian) { buf.replaceSubrange(0..<4, with: $0) }
+        let requestABI: UInt32 = open ? 2 : abi
+        withUnsafeBytes(of: requestABI.littleEndian) { buf.replaceSubrange(0..<4, with: $0) }
         let s = Array(ssid.utf8.prefix(32)), p = Array(psk.utf8.prefix(63))
         buf.replaceSubrange(4..<(4 + s.count), with: s)
         buf.replaceSubrange(40..<(40 + p.count), with: p)
@@ -176,7 +179,9 @@ final class WifiModel: ObservableObject {
                 message = "Could not join \(p.ssid): " + Self.friendly(why)
             } else if Date().timeIntervalSince(pendingSince) > 60 && !busy {
                 pending = nil
-                if !failShown { message = "Could not join \(p.ssid): no answer from the access point." }
+                if !failShown {
+                    message = "Could not join \(p.ssid): " + (st.error.isEmpty ? "the driver did not complete the connection." : st.error)
+                }
             }
         }
         if (st.state == "idle" || st.state == "failed") && !userOff && pending == nil && rescanned { autoJoin() }
@@ -225,15 +230,24 @@ final class WifiModel: ObservableObject {
     func select(_ n: WifiNet) {
         message = nil
         if connected && st.ssid == n.ssid { return }
+        guard n.joinable else { return }
+        if n.security == "open" {
+            guard st.openSupported else { message = "Open networks need the matching test driver and a restart."; return }
+            // Manual selection only; do not save or automatically join open SSIDs.
+            join(n.ssid, "", remember: false, open: true)
+            return
+        }
         if let psk = saved[n.ssid] { join(n.ssid, psk, remember: false); return }
         joinTarget = .network(n.ssid)
     }
 
-    func join(_ ssid: String, _ psk: String, remember: Bool) {
+    func join(_ ssid: String, _ psk: String, remember: Bool, open: Bool = false) {
         guard (1...32).contains(ssid.utf8.count) else { message = "The network name must be 1-32 bytes."; return }
-        guard (8...63).contains(psk.utf8.count) else { message = "The password must be 8-63 characters."; return }
+        guard open ? (st.openSupported && psk.isEmpty) : (8...63).contains(psk.utf8.count) else {
+            message = "The password must be 8-63 characters; open networks require the matching test driver."; return
+        }
         eventsAtJoin = Set(st.events)
-        let kr = Driver.join(ssid: ssid, psk: psk)
+        let kr = Driver.join(ssid: ssid, psk: psk, open: open)
         if kr != KERN_SUCCESS { message = "Could not join \(ssid): " + explain(kr); return }
         userOff = false; message = nil; failShown = false; pendingSince = Date()
         pending = (ssid, psk, remember)
@@ -268,7 +282,7 @@ final class WifiModel: ObservableObject {
     // At start and after scans while not connected: join the strongest saved network in range, once per network.
     func autoJoin() {
         guard st.present, !userOff, pending == nil, st.state == "idle" || st.state == "failed" else { return }
-        guard let n = st.nets.first(where: { saved[$0.ssid] != nil && $0.joinable && !autoTried.contains($0.ssid) }),
+        guard let n = st.nets.first(where: { saved[$0.ssid] != nil && $0.joinable && $0.locked && !autoTried.contains($0.ssid) }),
               let psk = saved[n.ssid] else { return }
         autoTried.insert(n.ssid)
         join(n.ssid, psk, remember: false)
@@ -289,6 +303,9 @@ final class WifiModel: ObservableObject {
         line.contains("connect failed") || line.contains("failed rc=") || line.contains("no configured network") || line.contains("lost after")
     }
     static func friendly(_ line: String) -> String {
+        if line.contains("sta-fail") { return "the firmware could not create the access-point record; the driver may attempt recovery." }
+        if line.contains("bss-fail") { return "the firmware rejected network setup." }
+        if line.contains("roc-setup-fail") { return "the firmware rejected channel setup." }
         if line.contains("hw-prep-fail") { return "the driver could not set up the radio. Restart the Mac so the updated driver loads." }
         if line.contains("roc-fail") { return "the access point did not answer on its channel. Move closer and try again." }
         if line.contains("auth-fail") { return "the access point rejected the connection." }
@@ -468,13 +485,14 @@ struct NetworkRow: View {
     let n: WifiNet
     var saved: Bool { m.known.contains(n.ssid) }
     var connecting: Bool { m.connectingSSID == n.ssid }
+    var joinable: Bool { n.joinable && (n.locked || m.st.openSupported) }
 
     var body: some View {
-        HoverRow(action: n.joinable ? { m.select(n) } : nil) {
+        HoverRow(action: joinable ? { m.select(n) } : nil) {
             HStack(spacing: 10) {
                 SignalIcon(rssi: n.rssi)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(n.ssid).font(.system(size: 13)).lineLimit(1).foregroundStyle(n.joinable ? .primary : .secondary)
+                    Text(n.ssid).font(.system(size: 13)).lineLimit(1).foregroundStyle(joinable ? .primary : .secondary)
                     Text(sub).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
@@ -485,9 +503,9 @@ struct NetworkRow: View {
         .contextMenu {
             Text("\(n.channel > 14 ? "5 GHz" : "2.4 GHz") · channel \(n.channel)" + (n.rssi == 0 ? "" : " · \(n.rssi) dBm") + " · " + n.security.uppercased())
             Divider()
-            if n.joinable {
+            if joinable {
                 Button(saved ? "Connect" : "Connect…") { m.select(n) }
-                if saved { Button("Connect with a Different Password…") { m.message = nil; m.joinTarget = .network(n.ssid) } }
+                if saved && n.locked { Button("Connect with a Different Password…") { m.message = nil; m.joinTarget = .network(n.ssid) } }
             }
             if saved { Button("Forget This Network") { m.forget(n.ssid) } }
             Divider()
@@ -501,7 +519,7 @@ struct NetworkRow: View {
         if n.rssi != 0 { s += " · \(n.rssi) dBm" }
         s += n.locked ? " · " + n.security.uppercased() : " · Open"
         if saved { s += " · Saved" }
-        if !n.joinable { s += " · not supported yet" }
+        if !joinable { s += n.security == "open" ? " · needs test driver" : " · not supported yet" }
         return s
     }
 }
@@ -529,7 +547,7 @@ struct ContentView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Wi-Fi").font(.system(size: 13, weight: .semibold))
-                    Text("MediaTek MT7922 · itlmt7922").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("MT7922 · Open test 2 · 2026-10-26").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if m.busy { ProgressView().controlSize(.small) }
@@ -598,6 +616,7 @@ struct ContentView: View {
             HStack {
                 Toggle("Open at Login", isOn: Binding(get: { m.loginEnabled }, set: { m.setLogin($0) }))
                     .toggleStyle(.switch).controlSize(.mini).font(.system(size: 12))
+                    .disabled(true).help("Launch this test build manually while testing.")
                 Spacer()
                 Link("by thanhnndev", destination: URL(string: "https://github.com/thanhnndev")!)
                     .font(.system(size: 11)).foregroundStyle(.secondary).help("github.com/thanhnndev")

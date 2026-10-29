@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #define ITL_UC_ABI_VERSION 1
+#define ITL_UC_OPEN_ABI_VERSION 2 // same struct size; empty PSK explicitly means open
 
 enum {
     kItlUcScan = 0,        // no input; refused (kIOReturnBusy) within 10 s of the previous scan
@@ -30,7 +31,7 @@ enum {
 struct itl_uc_join {
     uint32_t abi;          // ITL_UC_ABI_VERSION
     char ssid[36];         // NUL terminated, 1..32 bytes
-    char psk[68];          // NUL terminated passphrase, 8..63 characters
+    char psk[68];          // ABI 1: 8..63 bytes; ABI 2: empty (open network only)
 };
 
 #endif
